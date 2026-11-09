@@ -1,0 +1,1225 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>スプライトシート・プレビューア</title>
+<!-- PWA（アプリとしてインストール）用の設定。ダブルクリックで開く場合は使われないが、あっても害はない -->
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#23262b">
+<link rel="icon" type="image/png" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<!--
+  ============================================================
+  スプライトシート・アニメーションプレビューア（2D版）
+  ・このファイル1つだけで動きます。ダブルクリックでブラウザに開いてください。
+  ・外部ライブラリ／サーバーは使っていません。
+  ・https で公開すると、アプリとしてインストールできます（PWA）。
+    そのとき一緒に使うファイル: manifest.webmanifest（アプリ名やアイコンの設定）、
+    sw.js（オフライン対応）、icons/（アイコン画像）
+  ・構成（C++で言うと「ファイル分割」のイメージ）
+      [共通部分]   設定の保存、メッセージ表示、ファイルの振り分け、モード切替
+      [2D部分]     Viewer2D … 2D用の表示処理と操作パネル（ほかと独立）
+      [3D部分]     ★ここに3D対応を追加する（今はまだ無い）
+  ============================================================
+-->
+<style>
+  /* ---------- 色などの共通設定（CSS変数 = C++のconst定数のようなもの） ---------- */
+  :root {
+    --panel-bg: #23262b;
+    --panel-fg: #dcdcdc;
+    --sub-fg:   #9aa0a8;
+    --line:     #3a3e45;
+    --input-bg: #15171a;
+    --accent:   #4aa3ff;
+    --warn:     #ffb340;
+    --err:      #ff6b6b;
+    --ok:       #6bd68a;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }   /* hidden属性を確実に効かせる */
+  html, body { margin: 0; height: 100%; }
+  body {
+    display: flex;                     /* 左:プレビュー / 右:操作パネル */
+    font: 12px/1.4 "Segoe UI", "Meiryo", sans-serif;
+    background: #1b1d21;
+    color: var(--panel-fg);
+    overflow: hidden;
+  }
+
+  /* ---------- メイン（プレビューが主役） ---------- */
+  #main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+
+  /* アニメーション表示エリア */
+  #preview-wrap { flex: 1; min-height: 80px; position: relative; }
+  #preview-area { position: absolute; inset: 0; overflow: auto; display: flex; }
+  #preview-canvas {
+    margin: auto;                      /* 中央寄せ */
+    image-rendering: pixelated;        /* ドット絵をぼかさない（ニアレストネイバー） */
+    outline: 1px dashed rgba(128,128,128,.7);  /* 透過画像でも1コマの範囲が分かるように */
+  }
+  /* 左上に重ねて表示するフレーム番号 */
+  #preview-overlay {
+    position: absolute; left: 6px; top: 4px;
+    padding: 2px 6px; border-radius: 3px;
+    background: rgba(0,0,0,.6); color: #fff;
+    font: bold 14px/1.3 Consolas, monospace;
+    pointer-events: none;
+  }
+  /* 画像が無いときの案内文 */
+  #empty-hint {
+    margin: auto; text-align: center; color: var(--sub-fg);
+    border: 2px dashed var(--line); border-radius: 8px; padding: 24px 32px;
+    background: rgba(0,0,0,.35);
+  }
+
+  /* スプライトシート全体の表示エリア */
+  #sheet-area {
+    height: 36%; min-height: 60px; overflow: auto;
+    border-top: 2px solid var(--line); padding: 6px;
+  }
+  #sheet-canvas { display: block; image-rendering: pixelated; cursor: pointer; }
+
+  /* ---------- 背景色（透過PNGの確認用） ---------- */
+  .bg-black   { background: #000; }
+  .bg-white   { background: #fff; }
+  .bg-gray    { background: #808080; }
+  .bg-checker { background: repeating-conic-gradient(#c8c8c8 0 25%, #fff 0 50%) 0 0 / 16px 16px; }
+
+  /* ---------- 操作パネル（画面右端にまとめる） ---------- */
+  #panel {
+    width: 250px; flex-shrink: 0; overflow-y: auto;
+    background: var(--panel-bg); border-left: 1px solid var(--line);
+    padding: 6px 8px 10px;
+  }
+  #panel h2 {
+    font-size: 11px; font-weight: bold; color: var(--sub-fg);
+    margin: 10px 0 4px; padding-bottom: 2px; border-bottom: 1px solid var(--line);
+  }
+  .row { display: flex; align-items: center; gap: 4px; margin: 3px 0; flex-wrap: wrap; }
+  .row label { color: var(--sub-fg); }
+  .grid2 { display: grid; grid-template-columns: auto 1fr auto 1fr; gap: 3px 4px; align-items: center; }
+  .grid2 label { color: var(--sub-fg); white-space: nowrap; }
+  input[type=number], select {
+    width: 100%; min-width: 0; background: var(--input-bg); color: var(--panel-fg);
+    border: 1px solid var(--line); border-radius: 3px; padding: 2px 4px; font: inherit;
+  }
+  input[type=range] { flex: 1; min-width: 60px; }
+  button {
+    background: #343840; color: var(--panel-fg); border: 1px solid #4a4f58;
+    border-radius: 3px; padding: 3px 6px; font: inherit; cursor: pointer;
+  }
+  button:hover { background: #3f444d; }
+  button.active { background: var(--accent); color: #000; border-color: var(--accent); }
+  .btns { display: flex; gap: 3px; }
+  .btns button { flex: 1; }
+  .num { font-family: Consolas, monospace; }
+  .small { font-size: 11px; color: var(--sub-fg); }
+  #frame-display { font: bold 16px Consolas, monospace; }
+  #div-warning { color: var(--warn); font-size: 11px; white-space: pre-wrap; }
+  #message { min-height: 1.4em; font-size: 11px; white-space: pre-wrap; margin-top: 4px; }
+  #message.error { color: var(--err); }
+  #message.ok    { color: var(--ok); }
+  #message.warn  { color: var(--warn); }
+  #file-name { word-break: break-all; }
+  table.dx { border-collapse: collapse; width: 100%; }
+  table.dx td { border: 1px solid var(--line); padding: 1px 4px; }
+  table.dx td:last-child { text-align: right; font-family: Consolas, monospace; }
+  #dx-code {
+    width: 100%; height: 52px; resize: vertical; margin-top: 4px;
+    background: var(--input-bg); color: #b5e0ff; border: 1px solid var(--line);
+    font: 11px Consolas, monospace;
+  }
+
+  /* ---------- ドラッグ中に画面全体へ出す案内 ---------- */
+  #drop-overlay {
+    position: fixed; inset: 0; z-index: 100;
+    background: rgba(74,163,255,.25); border: 4px dashed var(--accent);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 22px; font-weight: bold; color: #fff; text-shadow: 0 0 6px #000;
+    pointer-events: none;
+  }
+
+  /* ---------- ウィンドウが狭いときは、パネルを下に回す ---------- */
+  @media (max-width: 620px) {
+    body { flex-direction: column; }
+    #panel { width: auto; height: 42%; border-left: none; border-top: 1px solid var(--line); }
+  }
+</style>
+</head>
+<body>
+
+<!-- ======================= メイン表示エリア ======================= -->
+<div id="main">
+
+  <!-- ===== 2D用の表示エリア（Viewer2Dだけが触る） ===== -->
+  <div id="view-2d" class="view">
+    <div id="preview-wrap">
+      <div id="preview-area" class="bg-checker">
+        <div id="empty-hint">
+          ここに画像をドラッグ＆ドロップ<br>
+          <span class="small">（PNG / JPG / GIF / WebP、画面のどこでもOK）</span>
+        </div>
+        <canvas id="preview-canvas" hidden></canvas>
+      </div>
+      <div id="preview-overlay" hidden>1 / 1</div>
+    </div>
+    <div id="sheet-area" class="bg-checker">
+      <canvas id="sheet-canvas" title="クリックでそのフレームへ移動"></canvas>
+    </div>
+  </div>
+
+  <!-- ★ここに3D対応を追加する
+       例: <div id="view-3d" class="view" hidden> <canvas id="canvas-3d"></canvas> </div>
+       （3Dモデルの描画エリア。activateMode('3d') で表示が切り替わる） -->
+</div>
+
+<!-- ======================= 操作パネル（右端） ======================= -->
+<aside id="panel">
+
+  <!-- ===== 共通パネル（2D/3Dどちらでも使う） ===== -->
+  <section id="panel-common">
+    <div class="row">
+      <button id="btn-open" style="flex:1">ファイルを開く…</button>
+      <input id="file-input" type="file" hidden
+             accept=".png,.jpg,.jpeg,.gif,.webp,.gltf,.glb">
+    </div>
+    <div id="message" class="small">画像をドロップしてください。</div>
+  </section>
+
+  <!-- ===== 2D用の操作パネル（Viewer2Dだけが触る） ===== -->
+  <div id="panel-2d" class="mode-panel">
+    <div class="row">
+      <button id="btn-dummy" style="flex:1" title="動作確認用に 32x32 × 8コマ のシートを作る">ダミー8コマを生成</button>
+    </div>
+    <div class="small"><span id="file-name">（画像なし）</span></div>
+    <div class="small num" id="image-size"></div>
+
+    <h2>コマの分割（どちらかを入力 → もう一方は自動計算）</h2>
+    <div class="grid2">
+      <label for="in-cols">横分割</label><input id="in-cols" type="number" min="1" value="4">
+      <label for="in-rows">縦分割</label><input id="in-rows" type="number" min="1" value="2">
+      <label for="in-fw">幅px</label><input id="in-fw" type="number" min="1" value="32">
+      <label for="in-fh">高さpx</label><input id="in-fh" type="number" min="1" value="32">
+      <label for="in-all" title="最後の行が埋まっていないシート用。横×縦より少なくできます">総コマ数</label>
+      <input id="in-all" type="number" min="1" value="8" title="最後の行が埋まっていないシート用。横×縦より少なくできます">
+    </div>
+    <div id="div-warning"></div>
+
+    <h2>再生</h2>
+    <div class="row" style="justify-content:space-between">
+      <span id="frame-display">- / -</span>
+      <span class="small" id="range-display"></span>
+    </div>
+    <div class="btns">
+      <button id="btn-first" title="範囲の先頭へ">|◀</button>
+      <button id="btn-prev"  title="1コマ戻し（←キー）">◀</button>
+      <button id="btn-play"  title="再生／一時停止（スペースキー）">▶ 再生</button>
+      <button id="btn-next"  title="1コマ送り（→キー）">▶</button>
+    </div>
+    <div class="row">
+      <label for="in-fps">FPS</label>
+      <input id="in-fps-range" type="range" min="1" max="60" value="8">
+      <input id="in-fps" type="number" min="1" max="60" value="8" style="width:46px">
+    </div>
+    <div class="row">
+      <label><input id="in-loop" type="checkbox" checked> ループ再生</label>
+    </div>
+
+    <h2>再生範囲（フレーム番号は 1 から数えます）</h2>
+    <div class="grid2">
+      <label for="in-start">開始</label><input id="in-start" type="number" min="1" value="1">
+      <label for="in-end">終了</label><input id="in-end" type="number" min="1" value="8">
+    </div>
+    <div class="row">
+      <label for="sel-row">行を選択</label>
+      <select id="sel-row" style="flex:1"></select>
+    </div>
+
+    <h2>表示</h2>
+    <div class="row">
+      <label for="in-zoom">拡大率</label>
+      <input id="in-zoom" type="range" min="1" max="8" value="4">
+      <span id="zoom-label" class="num" style="width:22px">4x</span>
+    </div>
+    <div class="row">
+      <label>背景</label>
+      <div class="btns" id="bg-buttons" style="flex:1">
+        <button data-bg="black">黒</button>
+        <button data-bg="white">白</button>
+        <button data-bg="gray">灰</button>
+        <button data-bg="checker">市松</button>
+      </div>
+    </div>
+    <div class="row">
+      <label for="sel-sheet-scale">シート表示倍率</label>
+      <select id="sel-sheet-scale" style="flex:1">
+        <option value="0.5">0.5x</option>
+        <option value="1">1x</option>
+        <option value="2">2x</option>
+        <option value="3">3x</option>
+        <option value="4">4x</option>
+      </select>
+    </div>
+
+    <h2>DxLib LoadDivGraph に渡す値</h2>
+    <table class="dx">
+      <tr><td>総コマ数 AllNum</td><td id="dx-all">-</td></tr>
+      <tr><td>横の分割数 XNum</td><td id="dx-x">-</td></tr>
+      <tr><td>縦の分割数 YNum</td><td id="dx-y">-</td></tr>
+      <tr><td>1コマの幅 XSize</td><td id="dx-w">-</td></tr>
+      <tr><td>1コマの高さ YSize</td><td id="dx-h">-</td></tr>
+    </table>
+    <textarea id="dx-code" readonly></textarea>
+    <div class="row"><button id="btn-copy" style="flex:1">コードをコピー</button></div>
+
+    <div class="small" style="margin-top:8px">
+      キー操作: スペース=再生/停止、←→=コマ送り
+    </div>
+  </div>
+
+  <!-- ★ここに3D対応を追加する
+       例: <div id="panel-3d" class="mode-panel" hidden> アニメーション選択、カメラ操作 など </div>
+       （activateMode('3d') を呼ぶと、panel-2d が隠れて panel-3d が表示される） -->
+</aside>
+
+<!-- ドラッグ中だけ表示する案内 -->
+<div id="drop-overlay" hidden>ここにドロップして読み込み</div>
+
+<script>
+'use strict';
+/* ==========================================================================
+   [共通] 小さな便利関数
+   ========================================================================== */
+
+// IDから要素を取り出す（document.getElementById は長いので短縮）
+function $(id) { return document.getElementById(id); }
+
+// 値を min〜max の範囲に収める（C++の std::clamp と同じ）
+function clamp(v, min, max) { return Math.min(Math.max(v, min), max); }
+
+// 画面右のメッセージ欄に文字を出す。type: 'info' | 'ok' | 'warn' | 'error'
+function showMessage(text, type) {
+  const el = $('message');
+  el.textContent = text;
+  el.className = 'small ' + (type || 'info');
+}
+
+/* ==========================================================================
+   [共通] 設定の保存・復元（localStorage）
+   ・ブラウザに小さなデータを保存できる仕組み。次回起動時に読み戻す。
+   ・C++で言えば、設定ファイル(ini)の読み書きに相当。
+   ========================================================================== */
+const STORAGE_KEY = 'spriteSheetPreviewer.settings.v1';
+
+// 初期値（保存データが無いときに使う）
+// ※3D対応を追加するときは、STORAGE_KEY を別名にして（例: '...settings3d.v1'）2D設定を上書きしないこと
+const DEFAULT_SETTINGS = {
+  cols: 4, rows: 2,          // 横・縦の分割数
+  allNum: 0,                 // 総コマ数の手動指定（0 = 自動で 横×縦）
+  frameW: 32, frameH: 32,    // 1コマの幅・高さ(px)
+  sizeModeX: 'div',          // 横を「分割数」で決めたか('div')、「px」で決めたか('px')
+  sizeModeY: 'div',          // 縦も同様
+  fps: 8,
+  loop: true,
+  zoom: 4,
+  bg: 'checker',
+  sheetScale: 2,
+  startFrame: 1, endFrame: 8 // 再生範囲（1始まり）
+};
+
+function loadSettings() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
+    return Object.assign({}, DEFAULT_SETTINGS, saved || {});
+  } catch (e) {
+    // 保存データが壊れている・保存できない環境でも、初期値で動かす
+    return Object.assign({}, DEFAULT_SETTINGS);
+  }
+}
+
+function saveSettings(settings) {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(settings)); }
+  catch (e) { /* 保存できなくても動作は続ける */ }
+}
+
+/* ==========================================================================
+   [2D] Viewer2D … 2D用の表示処理と操作パネルをまとめた「モジュール」
+   ・(function(){ ... })() の書き方は、中の変数を外から触れないようにする仕組み。
+     C++で言うと「クラスの private メンバ」に近い。
+   ・外に公開するのは最後の return { ... } に書いた関数だけ（= public メンバ）。
+   ========================================================================== */
+const Viewer2D = (function () {
+
+  // ---------- 状態（C++のメンバ変数に相当） ----------
+  const st = {
+    img: null,           // 読み込んだ画像（HTMLImageElement）
+    imgURL: null,        // 画像のURL（差し替え時に解放するため保持）
+    fileName: '',
+    cols: 4, rows: 2,    // 分割数
+    allNum: 0,           // 総コマ数の手動指定（0 = 自動で 横×縦）
+    frameW: 32, frameH: 32,
+    sizeModeX: 'div', sizeModeY: 'div',
+    current: 0,          // 現在のフレーム（内部では 0 始まり）
+    start: 0, end: 7,    // 再生範囲（内部では 0 始まり、end も含む）
+    playing: false,
+    fps: 8,
+    loop: true,
+    zoom: 4,
+    bg: 'checker',
+    sheetScale: 2,
+    lastTime: 0,         // 前回の更新時刻(ms)
+    acc: 0,              // 経過時間の貯金(ms)。1コマ分たまったら次のコマへ
+    active: false        // このモードが表示中かどうか
+  };
+
+  // シート表示で「範囲外を暗く」「コマ番号」を描くのは、この数までのコマに限る（重さ対策）
+  const MAX_DECORATED_CELLS = 4096;
+  // 「行を選択」に並べる行数の上限
+  const MAX_ROW_OPTIONS = 256;
+
+  // 描画用キャンバス
+  let previewCanvas, previewCtx, sheetCanvas, sheetCtx;
+
+  // 総コマ数。通常は「横×縦」。最後の行が埋まっていないシート用に、少なく指定することもできる
+  // （st.allNum が 0 なら自動 = 横×縦）
+  function gridCount() { return st.cols * st.rows; }
+  function total() { return st.allNum > 0 ? Math.min(st.allNum, gridCount()) : gridCount(); }
+
+  // 画像の幅・高さ（画像が無ければ 0）
+  function imgW() { return st.img ? st.img.naturalWidth : 0; }
+  function imgH() { return st.img ? st.img.naturalHeight : 0; }
+
+  // ---------- 初期化（起動時に1回だけ呼ぶ） ----------
+  function init(settings) {
+    previewCanvas = $('preview-canvas');
+    previewCtx = previewCanvas.getContext('2d');
+    sheetCanvas = $('sheet-canvas');
+    sheetCtx = sheetCanvas.getContext('2d');
+
+    // 保存されていた設定を状態に反映。
+    // 保存データが壊れていても動くように、1つずつ「正しい値か」を確かめてから使う
+    const D = DEFAULT_SETTINGS;
+    const posInt = (v, def) => (Number.isInteger(v) && v >= 1) ? v : def;   // 1以上の整数か
+    st.cols = posInt(settings.cols, D.cols);
+    st.rows = posInt(settings.rows, D.rows);
+    st.allNum = (Number.isInteger(settings.allNum) && settings.allNum >= 0) ? settings.allNum : 0;
+    st.frameW = posInt(settings.frameW, D.frameW);
+    st.frameH = posInt(settings.frameH, D.frameH);
+    st.sizeModeX = (settings.sizeModeX === 'px') ? 'px' : 'div';
+    st.sizeModeY = (settings.sizeModeY === 'px') ? 'px' : 'div';
+    st.fps = clamp(posInt(settings.fps, D.fps), 1, 60);
+    st.loop = !!settings.loop;
+    st.zoom = clamp(posInt(settings.zoom, D.zoom), 1, 8);
+    st.bg = ['black', 'white', 'gray', 'checker'].includes(settings.bg) ? settings.bg : D.bg;
+    st.sheetScale = [0.5, 1, 2, 3, 4].includes(settings.sheetScale) ? settings.sheetScale : D.sheetScale;
+    st.start = posInt(settings.startFrame, 1) - 1;
+    st.end = Math.max(st.start, posInt(settings.endFrame, D.endFrame) - 1);
+
+    bindEvents();
+    updateAllUI();
+    requestAnimationFrame(tick);   // アニメーション用のループを開始（ゲームのメインループと同じ考え方）
+  }
+
+  // ---------- 現在の設定を保存 ----------
+  function save() {
+    saveSettings({
+      cols: st.cols, rows: st.rows, allNum: st.allNum, frameW: st.frameW, frameH: st.frameH,
+      sizeModeX: st.sizeModeX, sizeModeY: st.sizeModeY,
+      fps: st.fps, loop: st.loop, zoom: st.zoom, bg: st.bg,
+      sheetScale: st.sheetScale,
+      startFrame: st.start + 1, endFrame: st.end + 1
+    });
+  }
+
+  // ---------- ファイル（File）から画像を読み込む ----------
+  function loadFile(file) {
+    const url = URL.createObjectURL(file);   // ファイルを一時的なURLに変換
+    loadImageFromURL(url, file.name, true);
+  }
+
+  // URLから画像を読み込む。isObjectURL=true なら差し替え時にURLを解放する
+  let loadCounter = 0;   // 読み込みの通し番号（連続でドロップされたとき、最後のものだけを採用する）
+  function loadImageFromURL(url, name, isObjectURL, onLoaded) {
+    const myId = ++loadCounter;
+    const img = new Image();
+    img.onload = function () {
+      if (myId !== loadCounter) {          // もっと新しい読み込みが始まっていたら、これは捨てる
+        if (isObjectURL) URL.revokeObjectURL(url);
+        return;
+      }
+      // 前の画像のURLを解放（メモリの後片付け。C++の delete に近い）
+      if (st.imgURL) URL.revokeObjectURL(st.imgURL);
+      st.imgURL = isObjectURL ? url : null;
+      if (onLoaded) onLoaded();
+      setImage(img, name);
+    };
+    img.onerror = function () {
+      if (isObjectURL) URL.revokeObjectURL(url);
+      showMessage('画像を読み込めませんでした: ' + name, 'error');
+    };
+    img.src = url;
+  }
+
+  // 読み込んだ画像をセットして再生開始
+  function setImage(img, name) {
+    st.img = img;
+    st.fileName = name;
+    recalcDivision();                 // 保存されていた分割設定を新しい画像に当てはめる
+    clampRange(false);                // 再生範囲をコマ数に収める
+    st.current = st.start;
+    st.acc = 0;
+    st.playing = true;                // すぐに再生
+    $('empty-hint').hidden = true;
+    previewCanvas.hidden = false;
+    $('preview-overlay').hidden = false;
+    updateAllUI();
+    save();
+    const ext = getExtension(name);
+    if (ext === 'gif' || ext === 'webp') {
+      // ブラウザの都合で、アニメーションGIF/WebPは1枚目しか描けない
+      showMessage('読み込みました: ' + name + '（' + imgW() + '×' + imgH() + 'px）\n※アニメーションGIF/WebPの場合、使われるのは1枚目だけです', 'warn');
+    } else {
+      showMessage('読み込みました: ' + name + '（' + imgW() + '×' + imgH() + 'px）', 'ok');
+    }
+  }
+
+  // ---------- 分割数とコマサイズの自動計算 ----------
+  // 最後にユーザーが入力した方（分割数 or px）を基準に、もう片方を計算する
+  function recalcDivision() {
+    const W = imgW(), H = imgH();
+    if (!W || !H) return;
+    if (st.sizeModeX === 'div') {
+      st.cols = clamp(st.cols, 1, W);
+      st.frameW = Math.floor(W / st.cols);
+    } else {
+      st.frameW = Math.max(1, st.frameW);
+      st.cols = Math.max(1, Math.floor(W / st.frameW));
+    }
+    if (st.sizeModeY === 'div') {
+      st.rows = clamp(st.rows, 1, H);
+      st.frameH = Math.floor(H / st.rows);
+    } else {
+      st.frameH = Math.max(1, st.frameH);
+      st.rows = Math.max(1, Math.floor(H / st.frameH));
+    }
+    if (st.allNum >= gridCount()) st.allNum = 0;   // 総コマ数の指定が 横×縦 以上なら自動に戻す
+  }
+
+  // 再生範囲を正しい値に収める。resetToAll=true なら全体を範囲にする
+  function clampRange(resetToAll) {
+    const last = total() - 1;
+    if (resetToAll) { st.start = 0; st.end = last; }
+    st.start = clamp(st.start, 0, last);
+    st.end = clamp(st.end, st.start, last);
+    if (st.current < st.start || st.current > st.end) st.current = st.start;
+  }
+
+  // 分割の入力欄が変更されたときの共通処理
+  // which: 'cols' | 'rows' | 'fw' | 'fh' | 'all'(総コマ数)
+  function onDivisionInput(which) {
+    const v = parseInt($('in-' + which).value, 10);
+    if (!(v >= 1)) return;            // 空欄や0以下は無視（入力途中のため）
+    const oldTotal = total();
+    const wasFullRange = (st.start === 0 && st.end === oldTotal - 1);  // 範囲が「全体」だったか
+    const W = imgW(), H = imgH();
+
+    if (which === 'cols') {
+      st.cols = v; st.sizeModeX = 'div';
+      if (W) { st.cols = Math.min(v, W); st.frameW = Math.floor(W / st.cols); $('in-fw').value = st.frameW; }
+    } else if (which === 'fw') {
+      st.frameW = v; st.sizeModeX = 'px';
+      if (W) { st.cols = Math.max(1, Math.floor(W / v)); $('in-cols').value = st.cols; }
+    } else if (which === 'rows') {
+      st.rows = v; st.sizeModeY = 'div';
+      if (H) { st.rows = Math.min(v, H); st.frameH = Math.floor(H / st.rows); $('in-fh').value = st.frameH; }
+    } else if (which === 'fh') {
+      st.frameH = v; st.sizeModeY = 'px';
+      if (H) { st.rows = Math.max(1, Math.floor(H / v)); $('in-rows').value = st.rows; }
+    } else if (which === 'all') {
+      // 横×縦 以上を入れたら「自動(0)」に戻す
+      st.allNum = (v >= gridCount()) ? 0 : v;
+    }
+
+    // 画像サイズを超える分割数が入力されたら、補正した値を欄に戻す
+    if (which === 'cols' && st.cols !== v) $('in-cols').value = st.cols;
+    if (which === 'rows' && st.rows !== v) $('in-rows').value = st.rows;
+    // 分割が変わって「総コマ数」が 横×縦 以上になったら自動に戻す
+    if (which !== 'all') {
+      if (st.allNum >= gridCount()) st.allNum = 0;
+      $('in-all').value = total();
+    }
+
+    // 範囲が「全体」だったなら新しいコマ数の全体に広げる。
+    // 手動で指定していた範囲は、できるだけそのまま残す（はみ出す分だけ縮める）
+    clampRange(wasFullRange && total() !== oldTotal);
+    updateAllUI(true);   // true = 分割欄は書き換えない（入力中のカーソルが飛ばないように）
+    save();
+  }
+
+  // ---------- 割り切れないときの警告文を作る ----------
+  function divisionWarning() {
+    const W = imgW(), H = imgH();
+    if (!W) return '';
+    const msgs = [];
+    if (st.frameW > W) msgs.push('⚠ 1コマの幅(' + st.frameW + 'px)が画像の幅(' + W + 'px)より大きいです');
+    else if (st.cols * st.frameW !== W)
+      msgs.push('⚠ 横: 画像幅 ' + W + 'px が ' + st.cols + '分割×' + st.frameW + 'px で割り切れません（余り ' + (W - st.cols * st.frameW) + 'px）');
+    if (st.frameH > H) msgs.push('⚠ 1コマの高さ(' + st.frameH + 'px)が画像の高さ(' + H + 'px)より大きいです');
+    else if (st.rows * st.frameH !== H)
+      msgs.push('⚠ 縦: 画像高さ ' + H + 'px が ' + st.rows + '分割×' + st.frameH + 'px で割り切れません（余り ' + (H - st.rows * st.frameH) + 'px）');
+    return msgs.join('\n');
+  }
+
+  // ---------- 再生制御 ----------
+  function setPlaying(p) {
+    if (!st.img) return;
+    // ループOFFで最後まで再生し終わっていたら、先頭から再生し直す
+    if (p && !st.loop && st.current >= st.end) st.current = st.start;
+    st.playing = p;
+    st.acc = 0;
+    updatePlayUI();
+    draw();
+  }
+
+  // 1コマ進める／戻す（dir = +1 or -1）。
+  // ループONなら範囲の端で反対側へ回り込み、ループOFFなら端で止まる
+  function step(dir) {
+    if (!st.img) return;
+    st.playing = false;
+    if (st.current < st.start || st.current > st.end) st.current = st.start;
+    else if (dir > 0) st.current = st.current >= st.end ? (st.loop ? st.start : st.end) : st.current + 1;
+    else st.current = st.current <= st.start ? (st.loop ? st.end : st.start) : st.current - 1;
+    updatePlayUI();
+    draw();
+  }
+
+  // 再生中に1コマ進める（ループOFFなら最後で止まる）
+  function advance() {
+    if (st.current < st.start || st.current > st.end) { st.current = st.start; return; }
+    if (st.current >= st.end) {
+      if (st.loop) st.current = st.start;
+      else { st.playing = false; updatePlayUI(); }
+    } else {
+      st.current++;
+    }
+  }
+
+  // ---------- メインループ（毎フレーム呼ばれる。DxLibの while(ProcessMessage()==0) と同じ役割） ----------
+  function tick(now) {
+    requestAnimationFrame(tick);
+    const dt = st.lastTime ? now - st.lastTime : 0;
+    st.lastTime = now;
+    if (!st.active || !st.playing || !st.img) return;
+
+    // タブが裏にあった等で時間が大きく飛んだときは、まとめてコマを進めずに仕切り直す
+    if (dt > 250) { st.acc = 0; return; }
+    st.acc += dt;
+    const interval = 1000 / st.fps;             // 1コマあたりの時間(ms)
+    let changed = false;
+    while (st.acc >= interval && st.playing) {  // 1コマ分の時間がたまったら進める
+      st.acc -= interval;
+      advance();
+      changed = true;
+    }
+    if (changed) { updateFrameUI(); draw(); }
+  }
+
+  // ---------- 描画 ----------
+  function draw() {
+    if (!st.img) return;
+    drawFrame();
+    drawSheet();
+  }
+
+  // 現在のコマだけを切り出してプレビューに描く
+  function drawFrame() {
+    const fw = st.frameW, fh = st.frameH;
+    if (previewCanvas.width !== fw || previewCanvas.height !== fh) {
+      previewCanvas.width = fw;               // キャンバスの実サイズ = 1コマのサイズ
+      previewCanvas.height = fh;
+    }
+    // 拡大はCSSで行う（image-rendering: pixelated でドットがくっきり）
+    previewCanvas.style.width = (fw * st.zoom) + 'px';
+    previewCanvas.style.height = (fh * st.zoom) + 'px';
+
+    // フレーム番号 → シート上の位置（左上から右へ、行が終わったら次の行。LoadDivGraphと同じ順番）
+    const sx = (st.current % st.cols) * fw;
+    const sy = Math.floor(st.current / st.cols) * fh;
+
+    previewCtx.imageSmoothingEnabled = false;
+    previewCtx.clearRect(0, 0, fw, fh);
+    previewCtx.drawImage(st.img, sx, sy, fw, fh, 0, 0, fw, fh);
+  }
+
+  // シート表示に実際に使う倍率。キャンバスが大きくなりすぎる（ブラウザの上限を超える）のを防ぐ
+  const MAX_SHEET_CANVAS = 8192;
+  function sheetScaleEff() {
+    const big = Math.max(imgW(), imgH()) || 1;
+    return Math.min(st.sheetScale, MAX_SHEET_CANVAS / big);
+  }
+
+  // シート全体を描き、区切り線と現在のコマの枠を重ねる
+  function drawSheet() {
+    const W = imgW(), H = imgH(), s = sheetScaleEff();
+    const cw = Math.round(W * s), ch = Math.round(H * s);
+    if (sheetCanvas.width !== cw || sheetCanvas.height !== ch) {
+      sheetCanvas.width = cw;
+      sheetCanvas.height = ch;
+    }
+    const ctx = sheetCtx;
+    ctx.imageSmoothingEnabled = false;
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.drawImage(st.img, 0, 0, cw, ch);
+
+    const fw = st.frameW * s, fh = st.frameH * s;
+    // コマが極端に多い（例: 1px分割）と1マスずつの処理が重くなるので、細かい装飾を省く
+    const tooMany = gridCount() > MAX_DECORATED_CELLS;
+
+    // 再生範囲の外のコマを暗くする。総コマ数より後ろの「使わないマス」はもっと暗くする
+    if (!tooMany) {
+      for (let i = 0; i < gridCount(); i++) {
+        if (i >= total()) ctx.fillStyle = 'rgba(0,0,0,0.75)';
+        else if (i < st.start || i > st.end) ctx.fillStyle = 'rgba(0,0,0,0.5)';
+        else continue;
+        ctx.fillRect((i % st.cols) * fw, Math.floor(i / st.cols) * fh, fw, fh);
+      }
+    }
+
+    // 区切り線（マゼンタ）。線が密集しすぎる場合は描かない
+    if (fw >= 3 && fh >= 3) {
+      ctx.strokeStyle = 'rgba(255,0,255,0.6)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (let c = 0; c <= st.cols; c++) {
+        const x = Math.round(c * fw) + 0.5;
+        ctx.moveTo(x, 0); ctx.lineTo(x, st.rows * fh);
+      }
+      for (let r = 0; r <= st.rows; r++) {
+        const y = Math.round(r * fh) + 0.5;
+        ctx.moveTo(0, y); ctx.lineTo(st.cols * fw, y);
+      }
+      ctx.stroke();
+    }
+
+    // コマ番号（コマが小さすぎる・多すぎるときは描かない）
+    if (!tooMany && fw >= 18 && fh >= 14) {
+      ctx.font = 'bold 10px Consolas, monospace';
+      ctx.textBaseline = 'top';
+      for (let i = 0; i < total(); i++) {
+        const x = (i % st.cols) * fw + 2, y = Math.floor(i / st.cols) * fh + 2;
+        ctx.fillStyle = '#000'; ctx.fillText(String(i + 1), x + 1, y + 1);
+        ctx.fillStyle = '#fff'; ctx.fillText(String(i + 1), x, y);
+      }
+    }
+
+    // 現在のコマを太枠で囲む
+    const cx = (st.current % st.cols) * fw, cy = Math.floor(st.current / st.cols) * fh;
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = '#000';
+    ctx.strokeRect(cx + 1, cy + 1, fw - 2, fh - 2);
+    ctx.strokeStyle = '#ffe000';
+    ctx.setLineDash([4, 3]);
+    ctx.strokeRect(cx + 1, cy + 1, fw - 2, fh - 2);
+    ctx.setLineDash([]);
+  }
+
+  // ---------- 画面（操作パネル）の更新 ----------
+  // skipDivisionInputs=true のときは分割の入力欄を書き換えない
+  function updateAllUI(skipDivisionInputs) {
+    if (!skipDivisionInputs) {
+      $('in-cols').value = st.cols;
+      $('in-rows').value = st.rows;
+      $('in-fw').value = st.frameW;
+      $('in-fh').value = st.frameH;
+      $('in-all').value = total();
+    }
+    $('file-name').textContent = st.img ? st.fileName : '（画像なし）';
+    $('image-size').textContent = st.img ? ('画像サイズ: ' + imgW() + ' × ' + imgH() + ' px') : '';
+    $('div-warning').textContent = divisionWarning();
+
+    $('in-fps').value = st.fps;
+    $('in-fps-range').value = st.fps;
+    $('in-loop').checked = st.loop;
+    $('in-zoom').value = st.zoom;
+    $('zoom-label').textContent = st.zoom + 'x';
+    $('sel-sheet-scale').value = String(st.sheetScale);
+    applyBackground();
+
+    updateRangeUI();
+    updateRowSelect();
+    updatePlayUI();
+    updateDxLib();
+    draw();
+  }
+
+  // 再生ボタンの表示とフレーム番号
+  function updatePlayUI() {
+    const b = $('btn-play');
+    b.textContent = st.playing ? '❚❚ 停止' : '▶ 再生';
+    b.classList.toggle('active', st.playing);
+    updateFrameUI();
+  }
+
+  // 「3 / 8」のようなフレーム番号表示
+  function updateFrameUI() {
+    const text = st.img ? (st.current + 1) + ' / ' + total() : '- / -';
+    $('frame-display').textContent = text;
+    $('preview-overlay').textContent = text;
+  }
+
+  // 再生範囲の入力欄
+  function updateRangeUI() {
+    const n = total();
+    $('in-start').max = n; $('in-end').max = n;
+    $('in-start').value = st.start + 1;
+    $('in-end').value = st.end + 1;
+    $('range-display').textContent = '範囲 ' + (st.start + 1) + '〜' + (st.end + 1) + '（' + (st.end - st.start + 1) + 'コマ）';
+  }
+
+  // 「行を選択」プルダウンの中身を作り直す
+  function updateRowSelect() {
+    const sel = $('sel-row');
+    sel.innerHTML = '';
+    const add = (value, label) => {
+      const o = document.createElement('option');
+      o.value = value; o.textContent = label; sel.appendChild(o);
+    };
+    add('custom', '（手動指定）');
+    add('all', '全フレーム（1〜' + total() + '）');
+    for (let r = 0; r < Math.min(st.rows, MAX_ROW_OPTIONS); r++) {
+      const a = r * st.cols + 1, b = Math.min((r + 1) * st.cols, total());
+      if (a > total()) break;   // 総コマ数より後ろの行は出さない
+      add('r' + r, (r + 1) + '行目（' + a + '〜' + b + '）');
+    }
+    // 今の範囲がどれかに一致していれば、それを選択状態にする
+    let v = 'custom';
+    const rowEnd = Math.min(st.start + st.cols, total()) - 1;
+    if (st.start === 0 && st.end === total() - 1) v = 'all';
+    else if (st.start % st.cols === 0 && st.end === rowEnd && st.start / st.cols < MAX_ROW_OPTIONS) v = 'r' + (st.start / st.cols);
+    sel.value = v;
+  }
+
+  // 背景色のクラスを付け替える
+  function applyBackground() {
+    ['preview-area', 'sheet-area'].forEach(id => {
+      const el = $(id);
+      el.classList.remove('bg-black', 'bg-white', 'bg-gray', 'bg-checker');
+      el.classList.add('bg-' + st.bg);
+    });
+    document.querySelectorAll('#bg-buttons button').forEach(b => {
+      b.classList.toggle('active', b.dataset.bg === st.bg);
+    });
+  }
+
+  // DxLib の LoadDivGraph 用の値とサンプルコード
+  function updateDxLib() {
+    const has = !!st.img;
+    $('dx-all').textContent = has ? total() : '-';
+    $('dx-x').textContent = has ? st.cols : '-';
+    $('dx-y').textContent = has ? st.rows : '-';
+    $('dx-w').textContent = has ? st.frameW : '-';
+    $('dx-h').textContent = has ? st.frameH : '-';
+    if (!has) { $('dx-code').value = ''; return; }
+    // C++の文字列に入れるので、\ と " はエスケープする
+    const name = (st.fileName || 'image.png').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    $('dx-code').value =
+      '// ファイルの場所は、実行ファイル(.exe)の作業フォルダからの相対パスです\n' +
+      'int handles[' + total() + '];\n' +
+      'LoadDivGraph("' + name + '", ' + total() + ', ' + st.cols + ', ' + st.rows + ', ' +
+      st.frameW + ', ' + st.frameH + ', handles);\n' +
+      '// 再生範囲: handles[' + st.start + ']〜handles[' + st.end + ']（配列は0始まり）';
+  }
+
+  // ---------- イベント（ボタンや入力欄の操作）の登録 ----------
+  function bindEvents() {
+    // 分割の入力欄（入力するたびに自動計算）
+    ['cols', 'rows', 'fw', 'fh', 'all'].forEach(w => {
+      $('in-' + w).addEventListener('input', () => onDivisionInput(w));
+      // 入力欄から離れたら、正しい値で表示し直す（空欄のままにしない）
+      $('in-' + w).addEventListener('change', () => updateAllUI());
+    });
+
+    // 再生ボタン類
+    $('btn-play').addEventListener('click', () => setPlaying(!st.playing));
+    $('btn-prev').addEventListener('click', () => step(-1));
+    $('btn-next').addEventListener('click', () => step(+1));
+    $('btn-first').addEventListener('click', () => {
+      st.playing = false; st.current = st.start; updatePlayUI(); draw();
+    });
+
+    // FPS（スライダーと数値欄を連動）
+    const setFps = (v) => {
+      v = parseInt(v, 10);
+      if (!(v >= 1)) return;
+      st.fps = clamp(v, 1, 60);
+      $('in-fps').value = st.fps;
+      $('in-fps-range').value = st.fps;
+      save();
+    };
+    $('in-fps-range').addEventListener('input', e => setFps(e.target.value));
+    $('in-fps').addEventListener('input', e => setFps(e.target.value));
+    $('in-fps').addEventListener('change', () => { $('in-fps').value = st.fps; });
+
+    // ループ
+    $('in-loop').addEventListener('change', e => { st.loop = e.target.checked; save(); });
+
+    // 再生範囲
+    const onRange = (which) => {
+      const v = parseInt($('in-' + which).value, 10);
+      if (!(v >= 1)) return;
+      const last = total() - 1;
+      if (which === 'start') {
+        st.start = clamp(v - 1, 0, last);
+        if (st.end < st.start) st.end = st.start;    // 開始 > 終了 にならないように
+      } else {
+        st.end = clamp(v - 1, 0, last);
+        if (st.start > st.end) st.start = st.end;
+      }
+      if (st.current < st.start || st.current > st.end) st.current = st.start;
+      // 入力中ではない方の欄を、補正後の値に合わせる
+      if (which === 'start') $('in-end').value = st.end + 1;
+      else $('in-start').value = st.start + 1;
+      $('range-display').textContent = '範囲 ' + (st.start + 1) + '〜' + (st.end + 1) + '（' + (st.end - st.start + 1) + 'コマ）';
+      updateRowSelect(); updateFrameUI(); updateDxLib(); draw(); save();
+    };
+    // 'change' は「入力が確定したとき」（Enter・欄から離れた・▲▼ボタン）に来るイベント。
+    // 'input' だと「12」と打つ途中の「1」で反映されてしまうので、確定時だけ反映する
+    $('in-start').addEventListener('change', () => { onRange('start'); updateRangeUI(); });
+    $('in-end').addEventListener('change', () => { onRange('end'); updateRangeUI(); });
+
+    // 行を選択
+    $('sel-row').addEventListener('change', e => {
+      const v = e.target.value;
+      if (v === 'all') { st.start = 0; st.end = total() - 1; }
+      else if (v[0] === 'r') {
+        const r = parseInt(v.slice(1), 10);
+        st.start = r * st.cols; st.end = Math.min(st.start + st.cols, total()) - 1;
+      } else return;
+      e.target.blur();   // フォーカスを外して、すぐにキー操作（スペース等）を使えるようにする
+      st.current = st.start; st.acc = 0;
+      updateRangeUI(); updateFrameUI(); updateDxLib(); draw(); save();
+    });
+
+    // 拡大率
+    $('in-zoom').addEventListener('input', e => {
+      st.zoom = clamp(parseInt(e.target.value, 10), 1, 8);
+      $('zoom-label').textContent = st.zoom + 'x';
+      draw(); save();
+    });
+
+    // 背景色
+    document.querySelectorAll('#bg-buttons button').forEach(b => {
+      b.addEventListener('click', () => { st.bg = b.dataset.bg; applyBackground(); save(); });
+    });
+
+    // シート表示倍率
+    $('sel-sheet-scale').addEventListener('change', e => {
+      st.sheetScale = parseFloat(e.target.value); draw(); save();
+      e.target.blur();   // キー操作をすぐ使えるように
+    });
+
+    // シートをクリック → そのコマへ移動（一時停止）
+    sheetCanvas.addEventListener('click', e => {
+      if (!st.img) return;
+      const rect = sheetCanvas.getBoundingClientRect();
+      // 表示サイズと実サイズの比率を考慮して、クリック位置を画像上の座標に直す
+      const s = sheetScaleEff();
+      const x = (e.clientX - rect.left) * (sheetCanvas.width / rect.width) / s;
+      const y = (e.clientY - rect.top) * (sheetCanvas.height / rect.height) / s;
+      const c = Math.floor(x / st.frameW), r = Math.floor(y / st.frameH);
+      if (c < 0 || c >= st.cols || r < 0 || r >= st.rows) return;
+      const idx = r * st.cols + c;
+      if (idx >= total()) return;            // 総コマ数より後ろの「使わないマス」は無視
+      st.current = idx;
+      st.playing = false;
+      if (idx < st.start || idx > st.end) {
+        showMessage('再生範囲の外のコマです（再生やコマ送りをすると範囲の先頭に戻ります）', 'warn');
+      }
+      updatePlayUI(); draw();
+    });
+
+    // ダミーのスプライトシートを生成
+    $('btn-dummy').addEventListener('click', makeDummySheet);
+
+    // コードをコピー
+    $('btn-copy').addEventListener('click', copyCode);
+  }
+
+  // ---------- キーボード操作（共通部分から呼ばれる） ----------
+  function onKeyDown(e) {
+    if (e.code === 'Space') { e.preventDefault(); setPlaying(!st.playing); }
+    else if (e.code === 'ArrowLeft') { e.preventDefault(); step(-1); }
+    else if (e.code === 'ArrowRight') { e.preventDefault(); step(+1); }
+  }
+
+  // ---------- コードをクリップボードへコピー ----------
+  function copyCode() {
+    const text = $('dx-code').value;
+    if (!text) return;
+    const fallback = () => {
+      // 古い方式（file:// で新方式が使えない場合の保険）
+      const ta = $('dx-code');
+      ta.focus(); ta.select();
+      let ok = false;
+      try { ok = document.execCommand('copy'); } catch (e) { ok = false; }  // 失敗すると false が返る
+      if (ok) showMessage('コピーしました', 'ok');
+      else showMessage('コピーできませんでした。選択済みなので Ctrl+C でコピーしてください', 'warn');
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text)
+        .then(() => showMessage('コピーしました', 'ok'))
+        .catch(fallback);
+    } else {
+      fallback();
+    }
+  }
+
+  // ---------- 動作確認用：8コマのダミーシートをコードで描いて作る ----------
+  // 32x32 のコマを 横4 × 縦2 に並べた 128x64 の画像（背景は透明）
+  function makeDummySheet() {
+    const FW = 32, FH = 32, COLS = 4, ROWS = 2, N = 8;
+    const cv = document.createElement('canvas');
+    cv.width = FW * COLS; cv.height = FH * ROWS;
+    const g = cv.getContext('2d');
+
+    // 1ピクセルの点を打つ関数（ドット絵らしく、fillRectで1x1を塗る）
+    const dot = (x, y, color) => { g.fillStyle = color; g.fillRect(x, y, 1, 1); };
+
+    for (let i = 0; i < N; i++) {
+      const ox = (i % COLS) * FW, oy = Math.floor(i / COLS) * FH;  // このコマの左上
+
+      // ボールの高さ：sinカーブで跳ねる
+      const t = i / N;
+      const bounce = Math.abs(Math.sin(t * Math.PI));
+      const cx = ox + 16, cy = oy + 22 - Math.round(bounce * 12);
+      const R = 6;
+
+      // 影（地面）
+      const shadowW = 7 - Math.round(bounce * 3);
+      g.fillStyle = 'rgba(0,0,0,0.35)';
+      g.fillRect(cx - shadowW, oy + 28, shadowW * 2, 2);
+
+      // ボール本体（円の内側のピクセルを塗る）
+      const hue = Math.round(i * 360 / N);
+      for (let y = -R; y <= R; y++) {
+        for (let x = -R; x <= R; x++) {
+          const d = x * x + y * y;
+          if (d <= R * R) {
+            const edge = d > (R - 1) * (R - 1);
+            dot(cx + x, cy + y, edge ? 'hsl(' + hue + ',70%,30%)' : 'hsl(' + hue + ',85%,58%)');
+          }
+        }
+      }
+      dot(cx - 2, cy - 3, '#fff'); dot(cx - 3, cy - 2, '#fff');   // ハイライト
+
+      // コマ番号の目印：左上に (i+1) 個の点
+      for (let k = 0; k <= i; k++) dot(ox + 2 + k * 2, oy + 2, '#ff3060');
+
+      // コマの外枠（区切りが分かるように薄い線）
+      g.fillStyle = 'rgba(80,80,80,0.6)';
+      g.fillRect(ox, oy + FH - 1, FW, 1);
+      g.fillRect(ox + FW - 1, oy, 1, FH);
+    }
+
+    // ダミー用に分割設定を 4×2 に合わせてから読み込む
+    loadImageFromURL(cv.toDataURL('image/png'), 'dummy_8frames.png', false, () => {
+      st.cols = COLS; st.rows = ROWS; st.allNum = 0;
+      st.sizeModeX = 'div'; st.sizeModeY = 'div';
+      st.start = 0; st.end = N - 1;
+    });
+  }
+
+  // ---------- モード切替時に呼ばれる ----------
+  function onActivate()   { st.active = true;  st.lastTime = 0; draw(); }
+  function onDeactivate() { st.active = false; st.playing = false; updatePlayUI(); }
+
+  // ---------- 外に公開する関数（public） ----------
+  return { init, loadFile, onActivate, onDeactivate, onKeyDown };
+})();
+
+/* ==========================================================================
+   ★ここに3D対応を追加する
+   const Viewer3D = (function () {
+     function init(settings) { ... }      // three.js 等の準備
+     function loadFile(file) { ... }      // glTF/GLB の読み込み
+     function onActivate()   { ... }
+     function onDeactivate() { ... }
+     function onKeyDown(e)   { ... }
+     return { init, loadFile, onActivate, onDeactivate, onKeyDown };
+   })();
+   ※ 外部ライブラリなしの方針なら、GLBの解析とWebGL描画を自前で書く必要があります。
+   ========================================================================== */
+
+/* ==========================================================================
+   [共通] モード（2D / 3D）の登録と切り替え
+   ・表示エリア(view)と操作パネル(panel)と処理(module)を1組にして登録する。
+   ・2D/3Dの切り替えボタンは作らず、ファイルの種類で自動的に切り替える。
+   ========================================================================== */
+const MODES = {
+  '2d': { view: 'view-2d', panel: 'panel-2d', module: Viewer2D },
+  // ★ここに3D対応を追加する
+  // '3d': { view: 'view-3d', panel: 'panel-3d', module: Viewer3D },
+};
+let currentMode = null;
+
+function activateMode(name) {
+  if (currentMode === name) return;
+  if (currentMode) MODES[currentMode].module.onDeactivate();
+  // 全モードの表示エリアとパネルをいったん隠し、選ばれたものだけ表示
+  for (const key in MODES) {
+    $(MODES[key].view).hidden = (key !== name);
+    $(MODES[key].panel).hidden = (key !== name);
+  }
+  currentMode = name;
+  MODES[name].module.onActivate();
+}
+
+/* ==========================================================================
+   [共通] ファイルの種類を判別して、処理を振り分ける
+   ========================================================================== */
+const IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp'];
+const MODEL_EXTS = ['gltf', 'glb'];   // 将来の3D用（今は未対応）
+
+// ファイル名から拡張子を小文字で取り出す（"Walk.PNG" → "png"）
+function getExtension(fileName) {
+  const i = fileName.lastIndexOf('.');
+  return i < 0 ? '' : fileName.slice(i + 1).toLowerCase();
+}
+
+// 拡張子から種類を判定する：'2d' | '3d' | 'unknown'
+function detectFileKind(file) {
+  const ext = getExtension(file.name);
+  if (IMAGE_EXTS.includes(ext)) return '2d';
+  if (MODEL_EXTS.includes(ext)) return '3d';
+  // 拡張子が無い・変わっていても、ブラウザが「画像」と判定したものは2Dとして扱う
+  if (file.type && /^image\/(png|jpeg|gif|webp)$/.test(file.type)) return '2d';
+  return 'unknown';
+}
+
+// ドロップ／ファイル選択されたファイルを、種類ごとの処理へ渡す（振り分けの中心）
+function handleDroppedFile(file) {
+  const kind = detectFileKind(file);
+  switch (kind) {
+    case '2d':
+      activateMode('2d');
+      Viewer2D.loadFile(file);
+      break;
+
+    case '3d':
+      // ★ここに3D対応を追加する
+      //   （先に MODES に '3d' を登録しておかないと activateMode('3d') でエラーになる）
+      //   activateMode('3d');
+      //   Viewer3D.loadFile(file);
+      showMessage('未対応の形式です（3Dモデルは今後対応予定）: ' + file.name, 'error');
+      break;
+
+    default:
+      showMessage('未対応の形式です: ' + file.name, 'error');
+      break;
+  }
+}
+
+/* ==========================================================================
+   [共通] ドラッグ＆ドロップ（画面全体で受け付ける）
+   ========================================================================== */
+(function setupDragAndDrop() {
+  const overlay = $('drop-overlay');
+  let depth = 0;   // 子要素の上を通るたびに enter/leave が来るので回数で管理
+
+  // ファイルのドラッグかどうか（文字列のドラッグなどは無視）
+  const isFileDrag = (e) => e.dataTransfer && Array.from(e.dataTransfer.types).includes('Files');
+
+  window.addEventListener('dragenter', e => {
+    if (!isFileDrag(e)) return;
+    e.preventDefault();
+    depth++;
+    overlay.hidden = false;
+  });
+  window.addEventListener('dragover', e => {
+    if (!isFileDrag(e)) return;
+    e.preventDefault();                 // これが無いとドロップできない
+    e.dataTransfer.dropEffect = 'copy';
+  });
+  window.addEventListener('dragleave', e => {
+    if (!isFileDrag(e)) return;
+    depth = Math.max(0, depth - 1);
+    if (depth === 0) overlay.hidden = true;
+  });
+  window.addEventListener('drop', e => {
+    e.preventDefault();                 // ブラウザが画像を直接開いてしまうのを防ぐ
+    depth = 0;
+    overlay.hidden = true;
+    const files = e.dataTransfer && e.dataTransfer.files;
+    if (files && files.length > 0) {
+      handleDroppedFile(files[0]);
+      // 複数ドロップされたときは1つ目だけ使う（読み込み結果のメッセージの後に追記）
+      if (files.length > 1) {
+        const el = $('message');
+        el.textContent += '\n※複数のファイルが渡されたため、1つ目（' + files[0].name + '）だけ使います';
+      }
+    }
+  });
+})();
+
+/* ==========================================================================
+   [共通] 「ファイルを開く」ボタン
+   ========================================================================== */
+$('btn-open').addEventListener('click', () => $('file-input').click());
+$('file-input').addEventListener('change', e => {
+  const f = e.target.files[0];
+  if (f) handleDroppedFile(f);
+  e.target.value = '';                  // 同じファイルをもう一度選べるように
+});
+
+/* ==========================================================================
+   [共通] キーボード操作 → 今のモードに渡す
+   ========================================================================== */
+window.addEventListener('keydown', e => {
+  // 入力欄で文字を打っているときは、ショートカットを効かせない
+  const tag = e.target.tagName, type = e.target.type;
+  const isArrow = (e.code === 'ArrowLeft' || e.code === 'ArrowRight');
+  if (tag === 'INPUT' && type !== 'range' && type !== 'checkbox') return;
+  if (tag === 'INPUT' && type === 'range' && isArrow) return;        // スライダーは←→で動かせるようにする
+  if (tag === 'INPUT' && type === 'checkbox' && e.code === 'Space') return; // チェックボックスはスペースで切り替え
+  if (tag === 'TEXTAREA' || tag === 'SELECT') return;
+  if (tag === 'BUTTON' && e.code === 'Space') e.target.blur();  // ボタンの二重反応を防ぐ
+  if (currentMode) MODES[currentMode].module.onKeyDown(e);
+});
+
+/* ==========================================================================
+   [共通] アプリ（PWA）としての対応
+   ========================================================================== */
+// ※ main() の最後で呼ぶ（2D表示の準備が終わってからファイルを受け取るため）
+function setupPWA() {
+  // (1) オフライン対応：Service Worker を登録する。
+  //     http/https で開いたときだけ使える（ダブルクリック = file:// のときは何もしない）
+  if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
+    navigator.serviceWorker.register('sw.js').catch(() => { /* 失敗しても普通に動く */ });
+  }
+
+  // (2) インストールしたアプリで、エクスプローラーの「プログラムから開く」で
+  //     画像を開いたとき、そのファイルを受け取って読み込む（対応ブラウザのみ）
+  if ('launchQueue' in window) {
+    window.launchQueue.setConsumer(async (launchParams) => {
+      if (!launchParams.files || launchParams.files.length === 0) return;
+      const file = await launchParams.files[0].getFile();
+      handleDroppedFile(file);
+    });
+  }
+}
+
+/* ==========================================================================
+   [共通] 起動処理（C++の main() に相当）
+   ========================================================================== */
+(function main() {
+  const settings = loadSettings();
+  Viewer2D.init(settings);
+  // ★ここに3D対応を追加する: Viewer3D.init(settings);
+  activateMode('2d');   // 起動直後は2D表示
+  setupPWA();           // アプリとしての機能（オフライン対応・ファイルから開く）
+})();
+</script>
+</body>
+</html>
