@@ -69,10 +69,11 @@
   }
   /* 画像が無いときの案内文 */
   #empty-hint {
-    margin: auto; text-align: center; color: var(--sub-fg);
-    border: 2px dashed var(--line); border-radius: 8px; padding: 24px 32px;
-    background: rgba(0,0,0,.35);
+    margin: auto; text-align: center; color: #fff; font-size: 14px;
+    border: 2px dashed var(--accent); border-radius: 8px; padding: 24px 32px;
+    background: rgba(20,22,26,.92);    /* どの背景色の上でも読めるよう、ほぼ不透明の濃い色にする */
   }
+  #empty-hint .small { color: #c8ccd2; }
 
   /* スプライトシート全体の表示エリア */
   #sheet-area {

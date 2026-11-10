@@ -5,7 +5,7 @@
    ・ファイルを更新したら、下の CACHE_VERSION の数字を1つ上げること。
      （上げないと、古いファイルが使われ続けることがある）
    ========================================================================== */
-const CACHE_VERSION = 1;
+const CACHE_VERSION = 2;
 const CACHE_NAME = 'sprite-previewer-v' + CACHE_VERSION;
 
 // オフライン用に保存しておくファイルの一覧
